@@ -1,0 +1,6 @@
+{
+  "name": "DECIDE AÍ",
+  "description": "Você escolhe as opções. A gente decide. Aplicativo rápido e divertido para decisões individuais ou em grupo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
