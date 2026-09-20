@@ -16,6 +16,8 @@ import {
   isFirebaseConfigured,
   handleFirestoreError,
   OperationType,
+  ensureAnonymousAuth,
+  getFirebaseAuth,
 } from './firebase';
 import {
   GroupRoomDoc,
@@ -65,7 +67,8 @@ export function saveLocalVote(roomId: string, optionId: string): void {
 }
 
 /**
- * Generates an uppercase 4-character code (e.g. "8F72") (Section 5)
+ * Generates an uppercase 4-character code (e.g. "8F72") (Section 5 & 28)
+ * Omits ambiguous characters like 0/O, 1/I to guarantee easy sharing
  */
 export function generateShortCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -108,7 +111,7 @@ export async function getUniquePublicCode(): Promise<string> {
 }
 
 export interface CreateGroupRoomParams {
-  creatorId: string;
+  creatorId?: string;
   creatorName: string;
   question: string;
   options: Array<{ id: string; text: string; emoji?: string }>;
@@ -118,15 +121,19 @@ export interface CreateGroupRoomParams {
 }
 
 /**
- * Creates a new multiplayer Group Room in Firestore (Section 6)
+ * Creates a new multiplayer Group Room in Firestore (Section 6, 8, 9)
+ * Always binds the room's hostId to the authenticated technical UID
  */
 export async function createGroupRoom(params: CreateGroupRoomParams): Promise<{ room: GroupRoomDoc; publicCode: string }> {
   const db = getFirebaseDb();
-  const publicCode = await getUniquePublicCode();
 
   if (!db) {
     throw new Error('Firebase não está configurado. Configure as variáveis VITE_FIREBASE_* no seu arquivo .env.local');
   }
+
+  // 1. Authenticate user anonymously to establish verified technical identity (Section 5, 6, 8)
+  const hostUid = await ensureAnonymousAuth();
+  const publicCode = await getUniquePublicCode();
 
   try {
     // Generate secure internal Firestore ID
@@ -141,6 +148,7 @@ export async function createGroupRoom(params: CreateGroupRoomParams): Promise<{ 
     }));
 
     const now = new Date().toISOString();
+    const hostDisplayName = params.creatorName.trim() || 'Criador';
 
     const newRoom: GroupRoomDoc = {
       id: roomId,
@@ -151,8 +159,8 @@ export async function createGroupRoom(params: CreateGroupRoomParams): Promise<{ 
       status: 'waiting',
       createdAt: now,
       updatedAt: now,
-      hostId: params.creatorId,
-      hostName: params.creatorName.trim() || 'Criador',
+      hostId: hostUid, // Protected technical identity from request.auth.uid (Section 8)
+      hostName: hostDisplayName,
       maxParticipants: params.maxParticipants || null,
       isSecretVoting: Boolean(params.isSecretVoting),
       winnerOptionId: null,
@@ -162,23 +170,23 @@ export async function createGroupRoom(params: CreateGroupRoomParams): Promise<{ 
       totalVotesCount: 0,
     };
 
-    // 1. Create Room Document
+    // 2. Create Room Document
     await setDoc(roomRef, newRoom);
 
-    // 2. Register Host Participant in Subcollection
-    const hostParticipantRef = doc(db, 'rooms', roomId, 'participants', params.creatorId);
+    // 3. Register Host Participant in Subcollection using hostUid
+    const hostParticipantRef = doc(db, 'rooms', roomId, 'participants', hostUid);
     const hostParticipant: Participant = {
-      id: params.creatorId,
-      name: params.creatorName.trim() || 'Criador',
+      id: hostUid,
+      name: hostDisplayName,
       joinedAt: now,
       isHost: true,
       active: true,
     };
     await setDoc(hostParticipantRef, hostParticipant);
 
-    // 3. Save Host identity locally for seamless reloads
-    saveLocalParticipant(roomId, { id: params.creatorId, name: hostParticipant.name });
-    saveLocalParticipant(publicCode, { id: params.creatorId, name: hostParticipant.name });
+    // 4. Save Host identity locally for seamless reloads and reconnects
+    saveLocalParticipant(roomId, { id: hostUid, name: hostParticipant.name });
+    saveLocalParticipant(publicCode, { id: hostUid, name: hostParticipant.name });
 
     return { room: newRoom, publicCode };
   } catch (err) {
@@ -187,7 +195,7 @@ export async function createGroupRoom(params: CreateGroupRoomParams): Promise<{ 
 }
 
 /**
- * Finds a room by its short public code (e.g. "8F72") (Section 8)
+ * Finds a room by its short public code (e.g. "8F72") (Section 8 & 28)
  */
 export async function findRoomByPublicCode(publicCode: string): Promise<GroupRoomDoc | null> {
   const db = getFirebaseDb();
@@ -228,25 +236,24 @@ export async function getRoomById(roomId: string): Promise<GroupRoomDoc | null> 
 }
 
 /**
- * Joins an existing room and registers the participant (Section 7 & 8)
+ * Joins an existing room and registers the participant (Section 7, 12, 13)
+ * Technical identity always binds to Firebase Auth UID
  */
 export async function joinGroupRoom(
   roomId: string,
-  participantName: string,
-  preferredId?: string
+  participantName: string
 ): Promise<Participant> {
   const db = getFirebaseDb();
   if (!db) {
     throw new Error('Firebase não está configurado.');
   }
 
-  // Check if user already has a saved participantId for this room
-  const local = getLocalParticipant(roomId);
-  const participantId = preferredId || local?.id || 'p_' + Math.random().toString(36).substring(2, 10);
-  const nameToUse = participantName.trim() || local?.name || 'Convidado';
+  // Enforce authentic technical UID
+  const participantUid = await ensureAnonymousAuth();
+  const nameToUse = participantName.trim() || 'Convidado';
 
   try {
-    const participantRef = doc(db, 'rooms', roomId, 'participants', participantId);
+    const participantRef = doc(db, 'rooms', roomId, 'participants', participantUid);
     const existing = await getDoc(participantRef);
 
     if (existing.exists()) {
@@ -255,24 +262,30 @@ export async function joinGroupRoom(
       return data;
     }
 
+    // Check if room has capacity constraint
+    const roomRef = doc(db, 'rooms', roomId);
+    const roomSnap = await getDoc(roomRef);
+    const roomData = roomSnap.exists() ? (roomSnap.data() as GroupRoomDoc) : null;
+    const isHost = roomData?.hostId === participantUid;
+
     const newParticipant: Participant = {
-      id: participantId,
+      id: participantUid,
       name: nameToUse,
       joinedAt: new Date().toISOString(),
-      isHost: false,
+      isHost,
       active: true,
     };
 
     await setDoc(participantRef, newParticipant);
-    saveLocalParticipant(roomId, { id: participantId, name: nameToUse });
+    saveLocalParticipant(roomId, { id: participantUid, name: nameToUse });
     return newParticipant;
   } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, `rooms/${roomId}/participants/${participantId}`);
+    handleFirestoreError(err, OperationType.WRITE, `rooms/${roomId}/participants/${participantUid}`);
   }
 }
 
 /**
- * Subscribes to real-time room document updates (Section 9)
+ * Subscribes to real-time room document updates (Section 9 & 22)
  */
 export function subscribeToRoom(
   roomId: string,
@@ -365,11 +378,15 @@ export function subscribeToVotes(
 }
 
 /**
- * Submits a vote atomically in Firestore, with server-authoritative duplicate protection (Sections 10 & 11)
+ * Submits a vote atomically in Firestore (Sections 10, 11, 14, 15, 16)
+ * Guaranteed:
+ * - One vote per participant per round
+ * - Authentic caller technical UID
+ * - Server-authoritative transaction
  */
 export async function submitVote(
   roomId: string,
-  participantId: string,
+  _participantId: string, // Enforced via auth
   participantName: string,
   optionId: string
 ): Promise<void> {
@@ -378,8 +395,11 @@ export async function submitVote(
     throw new Error('Firebase não está configurado.');
   }
 
-  const voteDocRef = doc(db, 'rooms', roomId, 'votes', participantId);
-  const participantRef = doc(db, 'rooms', roomId, 'participants', participantId);
+  // Ensure authenticated technical UID matches caller
+  const callerUid = await ensureAnonymousAuth();
+
+  const voteDocRef = doc(db, 'rooms', roomId, 'votes', callerUid);
+  const participantRef = doc(db, 'rooms', roomId, 'participants', callerUid);
   const roomRef = doc(db, 'rooms', roomId);
 
   try {
@@ -407,22 +427,36 @@ export async function submitVote(
 
       const now = new Date().toISOString();
 
+      // Ensure participant document exists in transaction
+      const participantSnap = await transaction.get(participantRef);
+      if (!participantSnap.exists()) {
+        const newParticipant: Participant = {
+          id: callerUid,
+          name: participantName.trim() || 'Participante',
+          joinedAt: now,
+          isHost: roomData.hostId === callerUid,
+          chosenOptionId: optionId,
+          votedAt: now,
+          active: true,
+        };
+        transaction.set(participantRef, newParticipant);
+      } else {
+        transaction.update(participantRef, {
+          chosenOptionId: optionId,
+          votedAt: now,
+        });
+      }
+
       // 1. Write vote document
       const voteData: Vote = {
         optionId,
-        participantId,
+        participantId: callerUid,
         participantName: participantName.trim() || 'Participante',
         createdAt: now,
       };
       transaction.set(voteDocRef, voteData);
 
-      // 2. Update participant document
-      transaction.update(participantRef, {
-        chosenOptionId: optionId,
-        votedAt: now,
-      });
-
-      // 3. Increment option votes in room doc
+      // 2. Increment option votes in room doc
       const updatedOptions = roomData.options.map((opt) => {
         if (opt.id === optionId) {
           return { ...opt, votes: (opt.votes || 0) + 1 };
@@ -440,22 +474,33 @@ export async function submitVote(
       });
     });
 
-    // Save locally for instant UI responsiveness
+    // Save locally for immediate UI responsiveness
     saveLocalVote(roomId, optionId);
   } catch (err) {
-    handleFirestoreError(err, OperationType.WRITE, `rooms/${roomId}/votes/${participantId}`);
+    handleFirestoreError(err, OperationType.WRITE, `rooms/${roomId}/votes/${callerUid}`);
   }
 }
 
 /**
- * Host opens voting state (Section 13)
+ * Host opens voting state (Section 13 & 18)
+ * Security rule: Only host can trigger waiting -> voting
  */
 export async function startVoting(roomId: string): Promise<void> {
   const db = getFirebaseDb();
   if (!db) return;
 
+  const callerUid = await ensureAnonymousAuth();
+
   try {
     const roomRef = doc(db, 'rooms', roomId);
+    const roomSnap = await getDoc(roomRef);
+    if (!roomSnap.exists()) throw new Error('Sala não encontrada');
+    const roomData = roomSnap.data() as GroupRoomDoc;
+
+    if (roomData.hostId !== callerUid) {
+      throw new Error('Apenas o anfitrião da sala pode iniciar a votação.');
+    }
+
     await updateDoc(roomRef, {
       status: 'voting',
       updatedAt: new Date().toISOString(),
@@ -466,7 +511,8 @@ export async function startVoting(roomId: string): Promise<void> {
 }
 
 /**
- * Host finishes voting, calculates winner or detects tie (Sections 10, 11, 13, 14, 15)
+ * Host finishes voting, calculates winner or detects tie (Sections 10, 11, 13, 14, 15, 19)
+ * Security rule: Only host can set status to finished or tie
  */
 export async function finishVoting(roomId: string): Promise<GroupRoomDoc> {
   const db = getFirebaseDb();
@@ -474,6 +520,7 @@ export async function finishVoting(roomId: string): Promise<GroupRoomDoc> {
     throw new Error('Firebase não está configurado.');
   }
 
+  const callerUid = await ensureAnonymousAuth();
   const roomRef = doc(db, 'rooms', roomId);
   const votesRef = collection(db, 'rooms', roomId, 'votes');
 
@@ -485,6 +532,10 @@ export async function finishVoting(roomId: string): Promise<GroupRoomDoc> {
     }
 
     const roomData = roomSnap.data() as GroupRoomDoc;
+
+    if (roomData.hostId !== callerUid) {
+      throw new Error('Apenas o anfitrião pode encerrar a votação.');
+    }
 
     // Recalculate official votes directly from the votes subcollection for 100% integrity
     const voteCounts: Record<string, number> = {};
@@ -519,7 +570,7 @@ export async function finishVoting(roomId: string): Promise<GroupRoomDoc> {
     } else {
       const tied = sorted.filter((opt) => opt.votes === topVotes);
       if (tied.length > 1) {
-        // Tie detected (Section 11 & 14)
+        // Tie detected (Section 11, 14, 20)
         tiedIds = tied.map((t) => t.id);
         newStatus = 'tie';
       } else if (tied.length === 1) {
@@ -552,7 +603,8 @@ export async function finishVoting(roomId: string): Promise<GroupRoomDoc> {
 }
 
 /**
- * Resolves a tie in Firestore (Sections 11 & 14)
+ * Resolves a tie in Firestore (Sections 11, 14, 20)
+ * Security rule: Only host can resolve tie
  */
 export async function resolveTieInFirestore(roomId: string, chosenWinnerId: string): Promise<void> {
   const db = getFirebaseDb();
@@ -560,9 +612,18 @@ export async function resolveTieInFirestore(roomId: string, chosenWinnerId: stri
     throw new Error('Firebase não está configurado.');
   }
 
+  const callerUid = await ensureAnonymousAuth();
   const roomRef = doc(db, 'rooms', roomId);
 
   try {
+    const roomSnap = await getDoc(roomRef);
+    if (!roomSnap.exists()) throw new Error('Sala não encontrada.');
+    const roomData = roomSnap.data() as GroupRoomDoc;
+
+    if (roomData.hostId !== callerUid) {
+      throw new Error('Apenas o anfitrião pode desempatar a votação.');
+    }
+
     const now = new Date().toISOString();
     await updateDoc(roomRef, {
       winnerOptionId: chosenWinnerId,

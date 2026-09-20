@@ -165,17 +165,17 @@ export const CreateDecisionModal: React.FC<CreateDecisionModalProps> = ({
           const newDecision: Decision = {
             id: room.id,
             publicCode,
-            creatorId: userProfile.id,
-            creatorName: userProfile.name || 'Você',
+            creatorId: room.hostId,
+            creatorName: room.hostName || userProfile.name || 'Você',
             question: cleanQuestion,
             type: 'group',
             status: 'waiting',
             options: room.options,
             participants: [
               {
-                id: userProfile.id,
-                name: userProfile.name || 'Você',
-                joinedAt: new Date().toISOString(),
+                id: room.hostId,
+                name: room.hostName || userProfile.name || 'Você',
+                joinedAt: room.createdAt,
                 isHost: true,
                 active: true,
               },

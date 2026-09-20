@@ -2,70 +2,175 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Helper functions
+    // ===============================================================
+    // HELPER FUNCTIONS (Eight Pillars Security Standards)
+    // ===============================================================
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isNonEmptyString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
     function isValidStatus(status) {
       return status in ['waiting', 'voting', 'finished', 'tie', 'closed'];
     }
 
-    function isNonEmptyString(val, maxLen) {
-      return val is string && val.size() > 0 && val.size() <= maxLen;
+    function getRoom(roomId) {
+      return get(/databases/$(database)/documents/rooms/$(roomId)).data;
     }
 
-    // Default deny all access unless explicitly matched
+    function roomExists(roomId) {
+      return exists(/databases/$(database)/documents/rooms/$(roomId));
+    }
+
+    // Default Deny: Disallow any access to unknown paths
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Rooms Collection
+    // ===============================================================
+    // ROOMS COLLECTION
+    // ===============================================================
     match /rooms/{roomId} {
-      // Any client can read the room details to join by public code or view results
+      // Any user can read room documents to discover or participate via short publicCode
       allow read: if true;
 
-      // Creation allowed with required schema fields
-      allow create: if isNonEmptyString(request.resource.data.publicCode, 10)
-                    && isNonEmptyString(request.resource.data.question, 200)
-                    && isNonEmptyString(request.resource.data.hostId, 100)
-                    && isValidStatus(request.resource.data.status)
+      // Create: Host must be authenticated and hostId must strictly match request.auth.uid
+      allow create: if isSignedIn()
+                    && request.resource.data.hostId == request.auth.uid
+                    && isNonEmptyString(request.resource.data.hostName, 1, 60)
+                    && isNonEmptyString(request.resource.data.publicCode, 4, 10)
+                    && isNonEmptyString(request.resource.data.question, 1, 200)
+                    && request.resource.data.status in ['waiting', 'voting']
                     && request.resource.data.options is list
                     && request.resource.data.options.size() >= 2
-                    && request.resource.data.options.size() <= 12;
+                    && request.resource.data.options.size() <= 12
+                    && isNonEmptyString(request.resource.data.createdAt, 10, 40)
+                    && (request.resource.data.winnerOptionId == null)
+                    && (request.resource.data.tiedOptionIds == null);
 
-      // Updates: Status changes, tie breaks, winner resolution, and vote counters
-      allow update: if isValidStatus(request.resource.data.status)
-                    && request.resource.data.options is list
-                    && request.resource.data.publicCode == resource.data.publicCode
-                    && request.resource.data.hostId == resource.data.hostId;
+      // Updates: Segregated into 4 atomic, strictly authorized workflows
+      allow update: if isSignedIn() && (
+        // Action 1: Host opens voting (waiting -> voting)
+        (
+          resource.data.hostId == request.auth.uid &&
+          resource.data.status == 'waiting' &&
+          request.resource.data.status == 'voting' &&
+          request.resource.data.hostId == resource.data.hostId &&
+          request.resource.data.publicCode == resource.data.publicCode &&
+          request.resource.data.question == resource.data.question &&
+          request.resource.data.createdAt == resource.data.createdAt &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+        )
+        ||
+        // Action 2: Host finishes voting and determines winner or tie (waiting/voting -> finished/tie)
+        (
+          resource.data.hostId == request.auth.uid &&
+          resource.data.status in ['waiting', 'voting'] &&
+          request.resource.data.status in ['finished', 'tie'] &&
+          request.resource.data.hostId == resource.data.hostId &&
+          request.resource.data.publicCode == resource.data.publicCode &&
+          request.resource.data.question == resource.data.question &&
+          request.resource.data.createdAt == resource.data.createdAt &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'options', 'status', 'winnerOptionId', 'tiedOptionIds',
+            'finishedAt', 'updatedAt', 'tieBreakActive'
+          ])
+        )
+        ||
+        // Action 3: Host resolves tie-breaker (tie -> finished)
+        (
+          resource.data.hostId == request.auth.uid &&
+          resource.data.status == 'tie' &&
+          request.resource.data.status == 'finished' &&
+          request.resource.data.hostId == resource.data.hostId &&
+          request.resource.data.publicCode == resource.data.publicCode &&
+          request.resource.data.question == resource.data.question &&
+          request.resource.data.createdAt == resource.data.createdAt &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'winnerOptionId', 'tiedOptionIds', 'status', 'isTieBreaker',
+            'tieBreakActive', 'updatedAt', 'finishedAt'
+          ])
+        )
+        ||
+        // Action 4: Participant vote registration in room (room remains active)
+        (
+          resource.data.status in ['waiting', 'voting'] &&
+          request.resource.data.status in ['waiting', 'voting'] &&
+          request.resource.data.hostId == resource.data.hostId &&
+          request.resource.data.publicCode == resource.data.publicCode &&
+          request.resource.data.question == resource.data.question &&
+          request.resource.data.createdAt == resource.data.createdAt &&
+          request.resource.data.winnerOptionId == resource.data.winnerOptionId &&
+          request.resource.data.tiedOptionIds == resource.data.tiedOptionIds &&
+          request.resource.data.tieBreakActive == resource.data.tieBreakActive &&
+          request.resource.data.isTieBreaker == resource.data.isTieBreaker &&
+          request.resource.data.finishedAt == resource.data.finishedAt &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'options', 'totalVotesCount', 'status', 'updatedAt'
+          ])
+        )
+      );
 
-      // Deletion only by host
-      allow delete: if request.resource.data.hostId == resource.data.hostId;
+      // Deletion: Only by the room's authenticated host
+      allow delete: if isSignedIn() && resource.data.hostId == request.auth.uid;
 
-      // Subcollection: Participants
+      // ===============================================================
+      // SUBCOLLECTION: PARTICIPANTS
+      // ===============================================================
       match /participants/{participantId} {
         // Read allowed for room participants
         allow read: if true;
 
-        // Create participant
-        allow create: if isNonEmptyString(request.resource.data.name, 50)
-                      && request.resource.data.id == participantId;
+        // Create: User can ONLY create their own participant record
+        allow create: if isSignedIn()
+                      && request.auth.uid == participantId
+                      && request.resource.data.id == participantId
+                      && isNonEmptyString(request.resource.data.name, 1, 60)
+                      && isNonEmptyString(request.resource.data.joinedAt, 10, 40)
+                      // Only true room host can set isHost: true
+                      && (request.resource.data.isHost != true || getRoom(roomId).hostId == request.auth.uid);
 
-        // Update own participant record (e.g. chosen option, active status)
-        allow update: if request.resource.data.id == participantId;
+        // Update: User can only update their own participant record
+        allow update: if isSignedIn()
+                      && request.auth.uid == participantId
+                      && request.resource.data.id == resource.data.id
+                      && request.resource.data.joinedAt == resource.data.joinedAt
+                      && request.resource.data.isHost == resource.data.isHost
+                      && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                        'chosenOptionId', 'votedAt', 'active', 'name'
+                      ]);
 
+        // Deletion forbidden
         allow delete: if false;
       }
 
-      // Subcollection: Votes
+      // ===============================================================
+      // SUBCOLLECTION: VOTES
+      // ===============================================================
       match /votes/{participantId} {
-        // Read allowed for counting and result breakdown
+        // Read allowed for tally and transparent results breakdown
         allow read: if true;
 
-        // Single vote creation: Vote must not already exist
-        allow create: if !exists(/databases/$(database)/documents/rooms/$(roomId)/votes/$(participantId))
+        // Create: Single vote per round per participant
+        allow create: if isSignedIn()
+                      // 1. Must be voting as oneself
+                      && request.auth.uid == participantId
                       && request.resource.data.participantId == participantId
-                      && isNonEmptyString(request.resource.data.optionId, 100)
-                      && isNonEmptyString(request.resource.data.createdAt, 50);
+                      // 2. Room must be in an active voting state
+                      && getRoom(roomId).status in ['waiting', 'voting']
+                      // 3. Must be a registered participant in the room
+                      && exists(/databases/$(database)/documents/rooms/$(roomId)/participants/$(participantId))
+                      // 4. Vote must not already exist
+                      && !exists(/databases/$(database)/documents/rooms/$(roomId)/votes/$(participantId))
+                      // 5. Valid optionId and timestamp
+                      && isNonEmptyString(request.resource.data.optionId, 1, 100)
+                      && isNonEmptyString(request.resource.data.createdAt, 10, 40);
 
-        // Votes are immutable once submitted
+        // Votes are strictly immutable once cast
         allow update: if false;
 
         // Votes cannot be deleted

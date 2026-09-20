@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import confetti from 'canvas-confetti';
 import { Trophy, Swords, Zap, Share2, RotateCw, Home, Users, Loader2 } from 'lucide-react';
-import { Decision, DecisionOption } from '../types';
-import { resolveTieInFirestore } from '../services/firestore';
+import { Decision, DecisionOption, GroupRoomDoc } from '../types';
+import { resolveTieInFirestore, subscribeToRoom } from '../services/firestore';
 import { resolveTie } from '../services/storage';
-import { isFirebaseConfigured } from '../services/firebase';
+import { isFirebaseConfigured, ensureAnonymousAuth } from '../services/firebase';
 
 interface GroupResultProps {
   decision: Decision;
@@ -22,9 +22,50 @@ export const GroupResult: React.FC<GroupResultProps> = ({
   const [decision, setDecision] = useState<Decision>(initialDecision);
   const [isResolvingTie, setIsResolvingTie] = useState<boolean>(false);
   const [tieTickerText, setTieTickerText] = useState<string>('');
+  const [isHost, setIsHost] = useState<boolean>(true);
 
   const publicCode = decision.publicCode || decision.id;
   const totalVotes = decision.options.reduce((sum, opt) => sum + (opt.votes || 0), 0);
+
+  // Check host identity
+  useEffect(() => {
+    let isMounted = true;
+    if (isFirebaseConfigured()) {
+      ensureAnonymousAuth()
+        .then((uid) => {
+          if (isMounted) {
+            setIsHost(uid === decision.creatorId);
+          }
+        })
+        .catch(() => {});
+    }
+    return () => {
+      isMounted = false;
+    };
+  }, [decision.creatorId]);
+
+  // Subscribe to real-time room updates so non-host and host receive tie-break results instantly
+  useEffect(() => {
+    if (!isFirebaseConfigured()) return;
+
+    const unsubscribe = subscribeToRoom(decision.id, (updatedRoom: GroupRoomDoc | null) => {
+      if (!updatedRoom) return;
+
+      setDecision((prev) => ({
+        ...prev,
+        status: updatedRoom.status,
+        options: updatedRoom.options,
+        winnerOptionId: updatedRoom.winnerOptionId || undefined,
+        tiedOptionIds: updatedRoom.tiedOptionIds || undefined,
+        isTieBreaker: updatedRoom.isTieBreaker,
+        finishedAt: updatedRoom.finishedAt,
+      }));
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [decision.id]);
 
   // Identify winner or tied options
   const isTie = !!(decision.status === 'tie' || (decision.tiedOptionIds && decision.tiedOptionIds.length > 1));
@@ -131,7 +172,7 @@ export const GroupResult: React.FC<GroupResultProps> = ({
               ⚡ Sorteando desempate: <br />
               <span className="text-amber-400 text-xl">{tieTickerText}</span>
             </div>
-          ) : (
+          ) : isHost ? (
             <button
               id="resolve-tie-btn"
               onClick={handleRunTieBreaker}
@@ -140,6 +181,11 @@ export const GroupResult: React.FC<GroupResultProps> = ({
               <Zap className="w-5 h-5 fill-current" />
               <span>DESEMPATAR</span>
             </button>
+          ) : (
+            <div className="py-3.5 px-4 bg-amber-50 border border-amber-200 rounded-2xl flex items-center justify-center gap-2.5 text-amber-800 text-xs font-bold">
+              <Loader2 className="w-4 h-4 animate-spin text-amber-600 shrink-0" />
+              <span>Aguardando o anfitrião realizar o desempate...</span>
+            </div>
           )}
         </div>
       ) : (

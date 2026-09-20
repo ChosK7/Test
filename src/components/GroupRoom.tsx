@@ -33,7 +33,7 @@ import {
   getLocalVoteForRoom,
   findDecisionById,
 } from '../services/storage';
-import { isFirebaseConfigured } from '../services/firebase';
+import { isFirebaseConfigured, ensureAnonymousAuth } from '../services/firebase';
 
 interface GroupRoomProps {
   decision: Decision;
@@ -72,23 +72,52 @@ export const GroupRoom: React.FC<GroupRoomProps> = ({
 
   // Initialize or restore local participant session
   useEffect(() => {
-    const local = getLocalParticipant(roomId);
-    if (local) {
-      setCurrentParticipant({
-        id: local.id,
-        name: local.name,
-        joinedAt: new Date().toISOString(),
-        isHost: local.id === decision.creatorId || local.id === userProfile.id,
-      });
-      setParticipantName(local.name);
-    } else if (decision.creatorId === userProfile.id) {
-      // Current user is creator
-      setCurrentParticipant({
-        id: userProfile.id,
-        name: userProfile.name || 'Criador',
-        joinedAt: decision.createdAt,
-        isHost: true,
-      });
+    let isMounted = true;
+
+    if (useFirebase) {
+      ensureAnonymousAuth()
+        .then((authUid) => {
+          if (!isMounted) return;
+          const local = getLocalParticipant(roomId);
+          const isHost = authUid === decision.creatorId;
+
+          if (local) {
+            setCurrentParticipant({
+              id: authUid,
+              name: local.name,
+              joinedAt: new Date().toISOString(),
+              isHost: isHost || local.id === decision.creatorId,
+            });
+            setParticipantName(local.name);
+          } else if (isHost) {
+            setCurrentParticipant({
+              id: authUid,
+              name: userProfile.name || 'Criador',
+              joinedAt: decision.createdAt,
+              isHost: true,
+            });
+          }
+        })
+        .catch((err) => console.error('Error ensuring auth in GroupRoom:', err));
+    } else {
+      const local = getLocalParticipant(roomId);
+      if (local) {
+        setCurrentParticipant({
+          id: local.id,
+          name: local.name,
+          joinedAt: new Date().toISOString(),
+          isHost: local.id === decision.creatorId || local.id === userProfile.id,
+        });
+        setParticipantName(local.name);
+      } else if (decision.creatorId === userProfile.id) {
+        // Current user is creator
+        setCurrentParticipant({
+          id: userProfile.id,
+          name: userProfile.name || 'Criador',
+          joinedAt: decision.createdAt,
+          isHost: true,
+        });
+      }
     }
 
     // Check if this device has already cast a vote
@@ -97,6 +126,10 @@ export const GroupRoom: React.FC<GroupRoomProps> = ({
       setHasVoted(true);
       setSelectedOptionId(localVote);
     }
+
+    return () => {
+      isMounted = false;
+    };
   }, [roomId, decision.creatorId, userProfile.id, userProfile.name, useFirebase, decision.createdAt]);
 
   // Subscribe to real-time Firestore listeners if Firebase is enabled
@@ -283,27 +316,23 @@ export const GroupRoom: React.FC<GroupRoomProps> = ({
 
   // Simulation of friend vote for testing multi-user flow
   const handleSimulateFriendVote = async () => {
+    if (useFirebase) {
+      setErrorMsg('No modo multiplayer real com Firebase, cada participante possui sua própria identidade segura. Abra o link da sala em uma aba anônima ou outro celular para votar como outro amigo!');
+      return;
+    }
+
     const randomOption = decision.options[Math.floor(Math.random() * decision.options.length)];
     const friendNames = ['Lucas', 'Camila', 'Rafael', 'Beatriz', 'Felipe', 'Mariana', 'Thiago', 'Larissa'];
     const randomName =
       friendNames[Math.floor(Math.random() * friendNames.length)] +
       ` #${Math.floor(Math.random() * 90 + 10)}`;
-    const randomId = 'sim_' + Math.random().toString(36).substring(2, 9);
 
-    try {
-      if (useFirebase) {
-        await submitVote(roomId, randomId, randomName, randomOption.id);
-      } else {
-        const updated = castVoteInRoom(roomId, randomName, randomOption.id);
-        if (updated) {
-          setDecision(updated);
-          if (updated.status === 'finished') {
-            onDecisionFinished(updated);
-          }
-        }
+    const updated = castVoteInRoom(roomId, randomName, randomOption.id);
+    if (updated) {
+      setDecision(updated);
+      if (updated.status === 'finished') {
+        onDecisionFinished(updated);
       }
-    } catch (err: any) {
-      console.error('Simulation error:', err);
     }
   };
 
