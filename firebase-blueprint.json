@@ -1,0 +1,157 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "name": "DECIDE AÍ - Firebase Blueprint",
+  "version": "1.0.0",
+  "description": "Multiplayer architecture and schema definition for DECIDE AÍ group decisions using Cloud Firestore.",
+  "entities": {
+    "Room": {
+      "collection": "rooms",
+      "description": "Represents an active or finished decision room.",
+      "fields": {
+        "id": {
+          "type": "string",
+          "description": "Unique Firestore document identifier."
+        },
+        "publicCode": {
+          "type": "string",
+          "description": "Short uppercase 4-character code (e.g. 8F72) used for URL sharing and quick entry."
+        },
+        "question": {
+          "type": "string",
+          "description": "The decision question or title."
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "text": { "type": "string" },
+              "emoji": { "type": "string" },
+              "votes": { "type": "number" }
+            },
+            "required": ["id", "text", "votes"]
+          },
+          "description": "List of available choices with real-time vote aggregates."
+        },
+        "category": {
+          "type": "string",
+          "description": "Optional category name (e.g. Comida, Rolê)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["waiting", "voting", "finished", "tie", "closed"],
+          "description": "Current state of the decision room."
+        },
+        "hostId": {
+          "type": "string",
+          "description": "Identifier of the room creator/host."
+        },
+        "hostName": {
+          "type": "string",
+          "description": "Display name of the host."
+        },
+        "maxParticipants": {
+          "type": ["number", "null"],
+          "description": "Participant limit or null if unlimited."
+        },
+        "isSecretVoting": {
+          "type": "boolean",
+          "description": "Whether votes are hidden until final reveal."
+        },
+        "winnerOptionId": {
+          "type": ["string", "null"],
+          "description": "Winning option ID once finished."
+        },
+        "tiedOptionIds": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "description": "Tied option IDs awaiting tie-break resolution."
+        },
+        "isTieBreaker": {
+          "type": "boolean",
+          "description": "Indicates whether the final result was settled by tie-break."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finishedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        }
+      },
+      "required": ["publicCode", "question", "options", "status", "hostId", "hostName", "createdAt"]
+    },
+    "Participant": {
+      "collection": "rooms/{roomId}/participants",
+      "description": "Represents a user connected to a specific group room.",
+      "fields": {
+        "id": {
+          "type": "string",
+          "description": "Participant identifier (or client UUID)."
+        },
+        "name": {
+          "type": "string",
+          "description": "Participant display name."
+        },
+        "joinedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "isHost": {
+          "type": "boolean"
+        },
+        "chosenOptionId": {
+          "type": "string",
+          "description": "Option ID the participant voted for."
+        },
+        "votedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "active": {
+          "type": "boolean"
+        }
+      },
+      "required": ["id", "name", "joinedAt"]
+    },
+    "Vote": {
+      "collection": "rooms/{roomId}/votes",
+      "description": "Immutable vote subcollection with single-vote per participant enforcement.",
+      "fields": {
+        "optionId": {
+          "type": "string",
+          "description": "ID of the voted option."
+        },
+        "participantId": {
+          "type": "string",
+          "description": "ID of the voting participant (matches document ID)."
+        },
+        "participantName": {
+          "type": "string",
+          "description": "Display name of the voter."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["optionId", "participantId", "createdAt"]
+    }
+  },
+  "indexes": [
+    {
+      "collectionGroup": "rooms",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "publicCode", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
+      ]
+    }
+  ]
+}

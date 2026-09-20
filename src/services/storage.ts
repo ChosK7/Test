@@ -68,8 +68,9 @@ export function getUserProfile(): UserProfile {
     name: 'Visitante',
     isLoggedIn: false,
     plan: 'free',
-    streakDays: 3,
-    totalDecisions: 6,
+    streakDays: 0,
+    totalDecisions: 0,
+    totalGroupDecisions: 0,
     createdAt: new Date().toISOString(),
   };
   saveUserProfile(defaultProfile);
@@ -92,82 +93,30 @@ export function updateUserPlan(plan: 'free' | 'premium'): UserProfile {
   return profile;
 }
 
-export function incrementUserDecisions(): UserProfile {
+export function incrementUserDecisions(isGroup: boolean = false): UserProfile {
   const profile = getUserProfile();
   profile.totalDecisions += 1;
+  if (isGroup) {
+    profile.totalGroupDecisions = (profile.totalGroupDecisions || 0) + 1;
+  }
   saveUserProfile(profile);
   return profile;
 }
 
-// Initial demo history to make the app feel alive and validate screen 14 immediately
-const INITIAL_DEMO_DECISIONS: Decision[] = [
-  {
-    id: 'D93A',
-    creatorId: 'user_demo',
-    creatorName: 'Carlos',
-    question: 'Onde vamos jantar hoje?',
-    type: 'raffle',
-    status: 'finished',
-    options: [
-      { id: 'opt_1', text: 'Pizza Napolitana', emoji: '🍕', votes: 0 },
-      { id: 'opt_2', text: 'Hambúrguer artesanal', emoji: '🍔', votes: 0 },
-      { id: 'opt_3', text: 'Sushi & Sashimi', emoji: '🍣', votes: 0 },
-    ],
-    participants: [],
-    isSecretVoting: false,
-    winnerOptionId: 'opt_1',
-    category: 'Comida',
-    createdAt: new Date(Date.now() - 3600 * 1000 * 4).toISOString(),
-    finishedAt: new Date(Date.now() - 3600 * 1000 * 4 + 15000).toISOString(),
-    isFavorite: true,
-  },
-  {
-    id: '8F72',
-    creatorId: 'user_demo',
-    creatorName: 'Marina',
-    question: 'Qual filme assistir no sábado?',
-    type: 'group',
-    status: 'finished',
-    options: [
-      { id: 'opt_4', text: 'Interestelar', emoji: '🚀', votes: 4 },
-      { id: 'opt_5', text: 'O Poderoso Chefão', emoji: '🎭', votes: 2 },
-      { id: 'opt_6', text: 'Superbad', emoji: '😂', votes: 1 },
-    ],
-    participants: [
-      { id: 'p1', name: 'Marina', chosenOptionId: 'opt_4' },
-      { id: 'p2', name: 'Lucas', chosenOptionId: 'opt_4' },
-      { id: 'p3', name: 'Bia', chosenOptionId: 'opt_4' },
-      { id: 'p4', name: 'Felipe', chosenOptionId: 'opt_4' },
-      { id: 'p5', name: 'Thiago', chosenOptionId: 'opt_5' },
-      { id: 'p6', name: 'Camila', chosenOptionId: 'opt_5' },
-      { id: 'p7', name: 'Renato', chosenOptionId: 'opt_6' },
-    ],
-    isSecretVoting: true,
-    winnerOptionId: 'opt_4',
-    category: 'Entretenimento',
-    createdAt: new Date(Date.now() - 3600 * 1000 * 24).toISOString(),
-    finishedAt: new Date(Date.now() - 3600 * 1000 * 23).toISOString(),
-    isFavorite: false,
-  },
-];
+// Clean production history with no fabricated demo items (Section 25)
+const INITIAL_DEMO_DECISIONS: Decision[] = [];
 
 export function getDecisions(): Decision[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.DECISIONS);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed)) return parsed;
     }
   } catch (e) {
     console.error('Error loading decisions', e);
   }
 
-  // Initialize with starter history
-  try {
-    localStorage.setItem(STORAGE_KEYS.DECISIONS, JSON.stringify(INITIAL_DEMO_DECISIONS));
-  } catch (e) {
-    // ignore
-  }
   return INITIAL_DEMO_DECISIONS;
 }
 
@@ -291,6 +240,7 @@ export function castVoteInRoom(roomId: string, participantName: string, optionId
   const newParticipant: Participant = {
     id: participantId,
     name: participantName.trim() || 'Participante',
+    joinedAt: new Date().toISOString(),
     chosenOptionId: optionId,
     votedAt: new Date().toISOString(),
   };
@@ -399,7 +349,7 @@ export function suggestEmoji(text: string): string {
 }
 
 // Gamification achievements definition
-export function getAchievements(totalDecisions: number): Achievement[] {
+export function getAchievements(totalDecisions: number, totalGroupDecisions: number = 0): Achievement[] {
   return [
     {
       id: 'first_decision',
@@ -424,8 +374,8 @@ export function getAchievements(totalDecisions: number): Achievement[] {
       title: 'Líder da Turma',
       description: 'Criou ou votou em uma decisão em grupo',
       icon: '👥',
-      unlocked: true,
-      progress: 1,
+      unlocked: totalGroupDecisions >= 1,
+      progress: Math.min(totalGroupDecisions, 1),
       maxProgress: 1,
     },
     {

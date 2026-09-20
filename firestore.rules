@@ -1,0 +1,76 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isValidStatus(status) {
+      return status in ['waiting', 'voting', 'finished', 'tie', 'closed'];
+    }
+
+    function isNonEmptyString(val, maxLen) {
+      return val is string && val.size() > 0 && val.size() <= maxLen;
+    }
+
+    // Default deny all access unless explicitly matched
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Rooms Collection
+    match /rooms/{roomId} {
+      // Any client can read the room details to join by public code or view results
+      allow read: if true;
+
+      // Creation allowed with required schema fields
+      allow create: if isNonEmptyString(request.resource.data.publicCode, 10)
+                    && isNonEmptyString(request.resource.data.question, 200)
+                    && isNonEmptyString(request.resource.data.hostId, 100)
+                    && isValidStatus(request.resource.data.status)
+                    && request.resource.data.options is list
+                    && request.resource.data.options.size() >= 2
+                    && request.resource.data.options.size() <= 12;
+
+      // Updates: Status changes, tie breaks, winner resolution, and vote counters
+      allow update: if isValidStatus(request.resource.data.status)
+                    && request.resource.data.options is list
+                    && request.resource.data.publicCode == resource.data.publicCode
+                    && request.resource.data.hostId == resource.data.hostId;
+
+      // Deletion only by host
+      allow delete: if request.resource.data.hostId == resource.data.hostId;
+
+      // Subcollection: Participants
+      match /participants/{participantId} {
+        // Read allowed for room participants
+        allow read: if true;
+
+        // Create participant
+        allow create: if isNonEmptyString(request.resource.data.name, 50)
+                      && request.resource.data.id == participantId;
+
+        // Update own participant record (e.g. chosen option, active status)
+        allow update: if request.resource.data.id == participantId;
+
+        allow delete: if false;
+      }
+
+      // Subcollection: Votes
+      match /votes/{participantId} {
+        // Read allowed for counting and result breakdown
+        allow read: if true;
+
+        // Single vote creation: Vote must not already exist
+        allow create: if !exists(/databases/$(database)/documents/rooms/$(roomId)/votes/$(participantId))
+                      && request.resource.data.participantId == participantId
+                      && isNonEmptyString(request.resource.data.optionId, 100)
+                      && isNonEmptyString(request.resource.data.createdAt, 50);
+
+        // Votes are immutable once submitted
+        allow update: if false;
+
+        // Votes cannot be deleted
+        allow delete: if false;
+      }
+    }
+  }
+}

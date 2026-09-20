@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Trash2, Dices, Users, Sparkles, X, Lock, EyeOff, AlertCircle } from 'lucide-react';
+import { Plus, Trash2, Dices, Users, Sparkles, X, Lock, EyeOff, AlertCircle, Loader2 } from 'lucide-react';
 import { CategoryTemplate, Decision, DecisionOption, DecisionType, UserProfile } from '../types';
 import { generateRoomCode, suggestEmoji } from '../services/storage';
+import { createGroupRoom } from '../services/firestore';
+import { isFirebaseConfigured } from '../services/firebase';
 
 interface CreateDecisionModalProps {
   initialTemplate?: CategoryTemplate | null;
@@ -35,6 +37,8 @@ export const CreateDecisionModal: React.FC<CreateDecisionModalProps> = ({
   const [isSecretVoting, setIsSecretVoting] = useState(true);
   const [category, setCategory] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState('');
+
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const maxAllowedOptions = userProfile.plan === 'premium' ? 12 : 6;
 
@@ -123,8 +127,9 @@ export const CreateDecisionModal: React.FC<CreateDecisionModalProps> = ({
     setErrorMsg('');
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
 
     const cleanQuestion = question.trim() || 'O que vamos escolher?';
     const validOptions = options
@@ -141,18 +146,100 @@ export const CreateDecisionModal: React.FC<CreateDecisionModalProps> = ({
       return;
     }
 
+    if (decisionType === 'group') {
+      setIsSubmitting(true);
+      setErrorMsg('');
+
+      try {
+        if (isFirebaseConfigured()) {
+          const { room, publicCode } = await createGroupRoom({
+            creatorId: userProfile.id,
+            creatorName: userProfile.name || 'Você',
+            question: cleanQuestion,
+            options: validOptions,
+            category: category || undefined,
+            maxParticipants: maxParticipants || null,
+            isSecretVoting,
+          });
+
+          const newDecision: Decision = {
+            id: room.id,
+            publicCode,
+            creatorId: userProfile.id,
+            creatorName: userProfile.name || 'Você',
+            question: cleanQuestion,
+            type: 'group',
+            status: 'waiting',
+            options: room.options,
+            participants: [
+              {
+                id: userProfile.id,
+                name: userProfile.name || 'Você',
+                joinedAt: new Date().toISOString(),
+                isHost: true,
+                active: true,
+              },
+            ],
+            maxParticipants: maxParticipants || undefined,
+            isSecretVoting,
+            category: category || undefined,
+            createdAt: room.createdAt,
+          };
+
+          setIsSubmitting(false);
+          onStartDecision(newDecision);
+          return;
+        } else {
+          // Fallback if environment variables are not yet configured
+          const roomId = generateRoomCode();
+          const newDecision: Decision = {
+            id: roomId,
+            publicCode: roomId,
+            creatorId: userProfile.id,
+            creatorName: userProfile.name || 'Você',
+            question: cleanQuestion,
+            type: 'group',
+            status: 'active',
+            options: validOptions,
+            participants: [
+              {
+                id: userProfile.id,
+                name: userProfile.name || 'Você',
+                joinedAt: new Date().toISOString(),
+                isHost: true,
+              },
+            ],
+            maxParticipants: maxParticipants || undefined,
+            isSecretVoting,
+            category: category || undefined,
+            createdAt: new Date().toISOString(),
+          };
+
+          setIsSubmitting(false);
+          onStartDecision(newDecision);
+          return;
+        }
+      } catch (err: any) {
+        console.error('Error creating group room:', err);
+        setErrorMsg('Erro ao conectar ao Firebase. Verifique sua conexão e credenciais.');
+        setIsSubmitting(false);
+        return;
+      }
+    }
+
+    // Individual Raffle Decision (always local and instant)
     const roomId = generateRoomCode();
     const newDecision: Decision = {
       id: roomId,
       creatorId: userProfile.id,
       creatorName: userProfile.name || 'Você',
       question: cleanQuestion,
-      type: decisionType,
-      status: decisionType === 'group' ? 'active' : 'draft',
+      type: 'raffle',
+      status: 'draft',
       options: validOptions,
       participants: [],
-      maxParticipants: decisionType === 'group' ? maxParticipants : undefined,
-      isSecretVoting: decisionType === 'group' ? isSecretVoting : false,
+      maxParticipants: undefined,
+      isSecretVoting: false,
       category: category || undefined,
       createdAt: new Date().toISOString(),
     };
@@ -398,10 +485,20 @@ export const CreateDecisionModal: React.FC<CreateDecisionModalProps> = ({
             <button
               id="start-decision-submit-btn"
               type="submit"
-              className="w-full py-4 px-6 bg-gradient-to-r from-rose-600 via-rose-500 to-amber-500 hover:from-rose-700 hover:to-amber-600 text-white font-black text-lg rounded-2xl shadow-lg shadow-rose-500/25 active:scale-98 transition-all flex items-center justify-center gap-2"
+              disabled={isSubmitting}
+              className="w-full py-4 px-6 bg-gradient-to-r from-rose-600 via-rose-500 to-amber-500 hover:from-rose-700 hover:to-amber-600 disabled:opacity-60 text-white font-black text-lg rounded-2xl shadow-lg shadow-rose-500/25 active:scale-98 transition-all flex items-center justify-center gap-2 cursor-pointer"
             >
-              <span>{decisionType === 'raffle' ? '🎲' : '👥'}</span>
-              <span>DECIDE AÍ</span>
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  <span>CRIANDO SALA...</span>
+                </>
+              ) : (
+                <>
+                  <span>{decisionType === 'raffle' ? '🎲' : '👥'}</span>
+                  <span>DECIDE AÍ</span>
+                </>
+              )}
             </button>
           </div>
         </form>

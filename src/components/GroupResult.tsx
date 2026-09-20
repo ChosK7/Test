@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import confetti from 'canvas-confetti';
-import { Trophy, Swords, Zap, Share2, RotateCw, Home, Users } from 'lucide-react';
+import { Trophy, Swords, Zap, Share2, RotateCw, Home, Users, Loader2 } from 'lucide-react';
 import { Decision, DecisionOption } from '../types';
+import { resolveTieInFirestore } from '../services/firestore';
 import { resolveTie } from '../services/storage';
+import { isFirebaseConfigured } from '../services/firebase';
 
 interface GroupResultProps {
   decision: Decision;
@@ -21,10 +23,11 @@ export const GroupResult: React.FC<GroupResultProps> = ({
   const [isResolvingTie, setIsResolvingTie] = useState<boolean>(false);
   const [tieTickerText, setTieTickerText] = useState<string>('');
 
-  const totalVotes = decision.options.reduce((sum, opt) => sum + opt.votes, 0);
+  const publicCode = decision.publicCode || decision.id;
+  const totalVotes = decision.options.reduce((sum, opt) => sum + (opt.votes || 0), 0);
 
   // Identify winner or tied options
-  const isTie = !!(decision.tiedOptionIds && decision.tiedOptionIds.length > 1);
+  const isTie = !!(decision.status === 'tie' || (decision.tiedOptionIds && decision.tiedOptionIds.length > 1));
 
   const winnerOption = decision.winnerOptionId
     ? decision.options.find((o) => o.id === decision.winnerOptionId)
@@ -44,12 +47,12 @@ export const GroupResult: React.FC<GroupResultProps> = ({
     }
   }, [isTie, winnerOption]);
 
-  const handleRunTieBreaker = () => {
+  const handleRunTieBreaker = async () => {
     if (!tiedOptions.length) return;
 
     setIsResolvingTie(true);
     let counter = 0;
-    const interval = setInterval(() => {
+    const interval = setInterval(async () => {
       counter++;
       const randomOpt = tiedOptions[counter % tiedOptions.length];
       setTieTickerText(`${randomOpt.emoji || '🎲'} ${randomOpt.text}`);
@@ -57,10 +60,25 @@ export const GroupResult: React.FC<GroupResultProps> = ({
       if (counter > 15) {
         clearInterval(interval);
         const chosen = tiedOptions[Math.floor(Math.random() * tiedOptions.length)];
-        const updated = resolveTie(decision.id, chosen.id);
-        if (updated) {
-          setDecision(updated);
+
+        try {
+          if (isFirebaseConfigured()) {
+            await resolveTieInFirestore(decision.id, chosen.id);
+          }
+        } catch (e) {
+          console.error('Error resolving tie in Firestore', e);
         }
+
+        // Local state update
+        const updated = resolveTie(decision.id, chosen.id) || {
+          ...decision,
+          winnerOptionId: chosen.id,
+          tiedOptionIds: undefined,
+          status: 'finished' as const,
+          isTieBreaker: true,
+        };
+
+        setDecision(updated);
         setIsResolvingTie(false);
 
         confetti({
@@ -73,11 +91,11 @@ export const GroupResult: React.FC<GroupResultProps> = ({
   };
 
   // Sort options by votes descending
-  const sortedOptions = [...decision.options].sort((a, b) => b.votes - a.votes);
+  const sortedOptions = [...decision.options].sort((a, b) => (b.votes || 0) - (a.votes || 0));
 
   return (
     <div className="min-h-[85vh] max-w-md mx-auto px-4 py-6 flex flex-col justify-center animate-in zoom-in-95 duration-200">
-      {/* TIE BREAKING SCREEN / STATE */}
+      {/* TIE BREAKING SCREEN / STATE (Section 14) */}
       {isTie ? (
         <div className="bg-white rounded-3xl border-2 border-amber-300 shadow-xl p-7 text-center">
           <div className="w-16 h-16 rounded-2xl bg-amber-100 text-amber-600 flex items-center justify-center text-3xl mx-auto mb-3 shadow-inner">
@@ -117,7 +135,7 @@ export const GroupResult: React.FC<GroupResultProps> = ({
             <button
               id="resolve-tie-btn"
               onClick={handleRunTieBreaker}
-              className="w-full py-4 px-4 bg-gradient-to-r from-amber-500 to-rose-600 hover:opacity-95 active:scale-98 text-white font-black text-base rounded-2xl shadow-lg shadow-rose-500/20 flex items-center justify-center gap-2 transition-all"
+              className="w-full py-4 px-4 bg-gradient-to-r from-amber-500 to-rose-600 hover:opacity-95 active:scale-98 text-white font-black text-base rounded-2xl shadow-lg shadow-rose-500/20 flex items-center justify-center gap-2 transition-all cursor-pointer"
             >
               <Zap className="w-5 h-5 fill-current" />
               <span>DESEMPATAR</span>
@@ -125,16 +143,16 @@ export const GroupResult: React.FC<GroupResultProps> = ({
           )}
         </div>
       ) : (
-        /* NORMAL OR RESOLVED WINNER SCREEN */
+        /* NORMAL OR RESOLVED WINNER SCREEN (Section 15) */
         <div className="space-y-4">
           {/* Winner Banner Card */}
           <div className="bg-white rounded-3xl border-2 border-slate-200/90 shadow-xl overflow-hidden p-6 text-center">
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-50 border border-rose-200 text-rose-600 font-extrabold text-xs tracking-wider uppercase mb-3">
               <Trophy className="w-3.5 h-3.5" />
-              <span>Resultado da Votação</span>
+              <span>Resultado da Votação #{publicCode}</span>
             </div>
 
-            <h2 className="text-xs font-bold text-slate-500 max-w-xs mx-auto mb-2">
+            <h2 className="text-sm font-bold text-slate-500 max-w-xs mx-auto mb-2">
               "{decision.question}"
             </h2>
 
@@ -158,12 +176,12 @@ export const GroupResult: React.FC<GroupResultProps> = ({
             <p className="text-xs font-bold text-slate-400 mt-2 flex items-center justify-center gap-1">
               <Users className="w-3.5 h-3.5" />
               <span>
-                {decision.participants.length || totalVotes} pessoas participaram.
+                {decision.participants?.length || totalVotes} pessoas participaram desta decisão.
               </span>
             </p>
           </div>
 
-          {/* Votes Breakdown (Section 10) */}
+          {/* Votes Breakdown (Section 10 & 15) */}
           <div className="bg-white rounded-3xl border border-slate-200/90 shadow-sm p-5">
             <h3 className="text-xs font-black uppercase tracking-wider text-slate-700 mb-3 flex items-center justify-between">
               <span>🎉 RESULTADO DETALHADO</span>
@@ -173,9 +191,9 @@ export const GroupResult: React.FC<GroupResultProps> = ({
             </h3>
 
             <div className="space-y-3">
-              {sortedOptions.map((opt, idx) => {
+              {sortedOptions.map((opt) => {
                 const isWinner = opt.id === winnerOption?.id;
-                const percentage = totalVotes > 0 ? Math.round((opt.votes / totalVotes) * 100) : 0;
+                const percentage = totalVotes > 0 ? Math.round(((opt.votes || 0) / totalVotes) * 100) : 0;
 
                 return (
                   <div key={opt.id} className="space-y-1">
@@ -192,7 +210,7 @@ export const GroupResult: React.FC<GroupResultProps> = ({
                         )}
                       </div>
                       <span className="text-slate-500 font-semibold">
-                        {opt.votes} {opt.votes === 1 ? 'voto' : 'votos'} ({percentage}%)
+                        {opt.votes || 0} {opt.votes === 1 ? 'voto' : 'votos'} ({percentage}%)
                       </span>
                     </div>
 
@@ -214,12 +232,12 @@ export const GroupResult: React.FC<GroupResultProps> = ({
         </div>
       )}
 
-      {/* Navigation and Action Buttons (Section 10) */}
+      {/* Navigation and Action Buttons */}
       <div className="mt-6 space-y-2.5">
         <button
           id="share-group-result-btn"
           onClick={() => onShare(decision)}
-          className="w-full py-3.5 px-4 bg-gradient-to-r from-rose-600 to-amber-500 hover:opacity-95 active:scale-98 text-white font-black text-sm rounded-2xl shadow-md shadow-rose-500/20 flex items-center justify-center gap-2 transition-all"
+          className="w-full py-3.5 px-4 bg-gradient-to-r from-rose-600 to-amber-500 hover:opacity-95 active:scale-98 text-white font-black text-sm rounded-2xl shadow-md shadow-rose-500/20 flex items-center justify-center gap-2 transition-all cursor-pointer"
         >
           <Share2 className="w-4 h-4" />
           <span>Compartilhar resultado</span>
@@ -229,7 +247,7 @@ export const GroupResult: React.FC<GroupResultProps> = ({
           <button
             id="new-decision-btn"
             onClick={onNewDecision}
-            className="py-3 px-4 bg-slate-900 hover:bg-slate-800 active:scale-98 text-white font-bold text-xs rounded-2xl flex items-center justify-center gap-1.5 transition-all"
+            className="py-3 px-4 bg-slate-900 hover:bg-slate-800 active:scale-98 text-white font-bold text-xs rounded-2xl flex items-center justify-center gap-1.5 transition-all cursor-pointer"
           >
             <RotateCw className="w-3.5 h-3.5" />
             <span>Nova decisão</span>
@@ -238,7 +256,7 @@ export const GroupResult: React.FC<GroupResultProps> = ({
           <button
             id="back-home-btn"
             onClick={onGoHome}
-            className="py-3 px-4 bg-white border border-slate-200 hover:bg-slate-50 active:scale-98 text-slate-700 font-bold text-xs rounded-2xl flex items-center justify-center gap-1.5 transition-all"
+            className="py-3 px-4 bg-white border border-slate-200 hover:bg-slate-50 active:scale-98 text-slate-700 font-bold text-xs rounded-2xl flex items-center justify-center gap-1.5 transition-all cursor-pointer"
           >
             <Home className="w-3.5 h-3.5" />
             <span>Voltar</span>

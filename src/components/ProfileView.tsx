@@ -20,7 +20,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   const [mockName, setMockName] = useState('');
   const [feedbackToast, setFeedbackToast] = useState('');
 
-  const achievements = getAchievements(userProfile.totalDecisions);
+  const achievements = getAchievements(userProfile.totalDecisions, userProfile.totalGroupDecisions || 0);
 
   const showToast = (msg: string) => {
     setFeedbackToast(msg);
