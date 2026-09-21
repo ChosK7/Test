@@ -1,35 +1,38 @@
 import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
-import { getFirestore, Firestore } from 'firebase/firestore';
+import { getFirestore, Firestore, doc, getDocFromServer } from 'firebase/firestore';
 import { getAuth, signInAnonymously, onAuthStateChanged, Auth, User } from 'firebase/auth';
+import firebaseAppletConfig from '../../firebase-applet-config.json';
 
 export interface FirebaseEnvConfig {
   apiKey?: string;
   authDomain?: string;
   projectId?: string;
+  firestoreDatabaseId?: string;
   storageBucket?: string;
   messagingSenderId?: string;
   appId?: string;
 }
 
-// Load environment variables safely using Vite convention
-const firebaseConfig: FirebaseEnvConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+// Safely merge firebase-applet-config.json and any Vite environment variables
+const resolvedConfig: FirebaseEnvConfig = {
+  apiKey: firebaseAppletConfig?.apiKey || import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: firebaseAppletConfig?.authDomain || import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: firebaseAppletConfig?.projectId || import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  firestoreDatabaseId: firebaseAppletConfig?.firestoreDatabaseId || import.meta.env.VITE_FIREBASE_DATABASE_ID,
+  storageBucket: firebaseAppletConfig?.storageBucket || import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: firebaseAppletConfig?.messagingSenderId || import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: firebaseAppletConfig?.appId || import.meta.env.VITE_FIREBASE_APP_ID,
 };
 
 /**
- * Checks whether valid Firebase credentials have been configured in environment variables.
+ * Checks whether valid Firebase credentials have been configured.
  */
 export function isFirebaseConfigured(): boolean {
   return Boolean(
-    firebaseConfig.apiKey &&
-    firebaseConfig.apiKey !== 'MY_FIREBASE_API_KEY' &&
-    firebaseConfig.projectId &&
-    firebaseConfig.projectId !== 'MY_FIREBASE_PROJECT_ID'
+    resolvedConfig.apiKey &&
+    resolvedConfig.apiKey !== 'MY_FIREBASE_API_KEY' &&
+    resolvedConfig.projectId &&
+    resolvedConfig.projectId !== 'MY_FIREBASE_PROJECT_ID'
   );
 }
 
@@ -49,7 +52,7 @@ export function getFirebaseApp(): FirebaseApp | null {
     if (getApps().length > 0) {
       appInstance = getApp();
     } else {
-      appInstance = initializeApp(firebaseConfig as Record<string, string>);
+      appInstance = initializeApp(resolvedConfig as Record<string, string>);
     }
   }
 
@@ -58,12 +61,17 @@ export function getFirebaseApp(): FirebaseApp | null {
 
 /**
  * Lazily initializes and returns the Firestore instance.
+ * CRITICAL: Must specify firestoreDatabaseId if provisioned with a custom database.
  */
 export function getFirebaseDb(): Firestore | null {
   if (!firestoreInstance) {
     const app = getFirebaseApp();
     if (app) {
-      firestoreInstance = getFirestore(app);
+      if (resolvedConfig.firestoreDatabaseId) {
+        firestoreInstance = getFirestore(app, resolvedConfig.firestoreDatabaseId);
+      } else {
+        firestoreInstance = getFirestore(app);
+      }
     }
   }
   return firestoreInstance;
@@ -80,6 +88,22 @@ export function getFirebaseAuth(): Auth | null {
     }
   }
   return authInstance;
+}
+
+// Validate connection to Firestore as mandated by the Firebase skill
+if (isFirebaseConfigured()) {
+  setTimeout(async () => {
+    try {
+      const db = getFirebaseDb();
+      if (db) {
+        await getDocFromServer(doc(db, 'test', 'connection'));
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('the client is offline')) {
+        console.error('Please check your Firebase configuration.');
+      }
+    }
+  }, 100);
 }
 
 /**
